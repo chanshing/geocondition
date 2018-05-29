@@ -12,8 +12,8 @@ import utils
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--outf', default='experiment00')
-    parser.add_argument('--hddfile', default='harddata00.dat')
+    parser.add_argument('--outf', default='experiment00', help='output folder')
+    parser.add_argument('--hddfile', default='harddata00.dat', help='file with hard data')
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--niter', type=int, default=3000)
     parser.add_argument('--seed', type=int, default=42)
