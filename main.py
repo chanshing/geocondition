@@ -41,7 +41,7 @@ if __name__ == '__main__':
     vv = 2.0*(vv - 0.5)         # move to tanh range
     vv = torch.from_numpy(vv.astype(np.float32)).to(device)
 
-    # define mean logp
+    # mean log-posterior
     def _mlogp(z):
         alpha = 0.1
         x = netG(z)
