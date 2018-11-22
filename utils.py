@@ -95,9 +95,11 @@ class Logger(object):
         nrows, ncols = self.nrows, self.ncols
         w = self.w
 
+        netI.eval()
         with torch.no_grad():
             z = netI(w)
             x = netG(z.view(-1,30,1,1)).detach().cpu().numpy().squeeze()
+        netI.train()
 
         fig = plt.figure(figsize=(10, 10*nrows/ncols))
         fig.subplots_adjust(top=1,right=1,bottom=0,left=0, hspace=.1, wspace=.01)
