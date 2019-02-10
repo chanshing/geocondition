@@ -1,5 +1,6 @@
 import os
 import argparse
+import logging
 import numpy as np
 
 import torch
@@ -10,65 +11,82 @@ cudnn.benchmark = True
 import models
 import utils
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--outf', default='experiment00', help='output folder')
-    parser.add_argument('--hddfile', default='harddata00.dat', help='file with hard data')
-    parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--niter', type=int, default=3000)
-    parser.add_argument('--seed', type=int, default=42)
-    args = parser.parse_args()
+parser = argparse.ArgumentParser()
+parser.add_argument('--seed', type=int, default=42)
+parser.add_argument('--outdir', default='gen/cond01', help='directory to store results')
+parser.add_argument('--condfile', default='dat/cond01.dat', help='file with conditioning config')
+parser.add_argument('--alpha', type=float, default=0.1, help='likelihood variance')
+parser.add_argument('--batch_size', type=int, default=64)
+parser.add_argument('--niter', type=int, default=1000)
+parser.add_argument('--lr', type=float, default=1e-4)
+# --- netG params
+parser.add_argument('--archG', default='DCGAN_G')
+parser.add_argument('--netG', default='netG.pth')
+parser.add_argument('--image_size', type=int, default=64)
+parser.add_argument('--image_depth', type=int, default=1, help='e.g. 1 for B&W, 3 for RGB')
+parser.add_argument('--num_filters', type=int, default=64, help='(\propto) number of conv filters per layer')
+parser.add_argument('--nz', type=int, default=30, help='size of latent vector z')
+# --- netI params
+parser.add_argument('--archI', default='FC_selu')
+parser.add_argument('--netI', default=None)
+parser.add_argument('--hidden_layer_size', type=int, default=512)
+parser.add_argument('--num_extra_layers', type=int, default=2)
+parser.add_argument('--nw', type=int, default=30, help='size of latent vector w')
+args = parser.parse_args()
 
-    os.system('mkdir -p {0}'.format(args.outf))
+os.system('mkdir -p {0}'.format(args.outdir))
+utils.config_logging(logging, args.outdir)
+utils.seedme(args.seed)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    utils.seedme(args.seed)
+netG = getattr(models, args.archG)(image_size=args.image_size, nz=args.nz, image_depth=args.image_depth, num_filters=args.num_filters).to(device)
+netG.load_state_dict(torch.load(args.netG))
+for p in netG.parameters():
+    p.requires_grad_(False)
+netG.eval()
+print netG
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+netI = getattr(models, args.archI)(input_size=args.nw, output_size=args.nz, hidden_layer_size=args.hidden_layer_size, num_extra_layers=args.num_extra_layers).to(device)
+if args.netI:
+    print "Found netI, loading..."
+    netI.load_state_dict(torch.load(args.netI))
+print netI
 
-    GMODEL = 'netG.pth'         # path to pre-trained generator
-    netG = models.DCGAN_G(isize=64, nz=30, nc=1, ngf=64).to(device)
-    netG.load_state_dict(torch.load(GMODEL))
-    for p in netG.parameters():
-        p.requires_grad_(False)
-    netG.eval()
-    print netG
+# load conditioning configurations
+ij, vals = utils.load_condfile(args.condfile)
+vals = utils.bin2tanh(vals)  # [0,1] -> [-1,1]
+vals = torch.from_numpy(vals.astype(np.float32)).to(device)
 
-    netI = models.FC_leaky(idim=30, odim=30).to(device)
-    print netI
+def logp(z):  # log posterior distribution
+    x = netG(z)
+    lpr = -0.5*(z**2).view(z.shape[0], -1).sum(-1)  # log prior
+    llh = -0.5*((x[...,ij[:,0],ij[:,1]] - vals)**2).view(x.shape[0], -1).sum(-1) / args.alpha  # log likelihood
+    return llh + lpr
 
-    # load harddata
-    ii, jj, vv = utils.load_harddata(args.hddfile)
-    vv = 2.0*(vv - 0.5)         # move to tanh range
-    vv = torch.from_numpy(vv.astype(np.float32)).to(device)
+optimizer = optim.Adam(netI.parameters(), lr=args.lr, amsgrad=True, betas=(0.5, 0.9))
+w = torch.FloatTensor(args.batch_size, args.nw).to(device)
 
-    # mean log-posterior
-    def _mlogp(z):
-        alpha = 0.1
-        x = netG(z)
-        llh = -0.5*((x[...,jj,ii] - vv)**2).sum()
-        llh = llh/alpha
-        lprior = (-0.5*(z**2).sum())
-        return (llh + lprior)/args.batch_size
+history = utils.History(args.outdir)
+plotter = utils.Plotter(args.outdir, netG, netI, args.condfile, torch.randn(64, args.nw).to(device))
 
-    w = torch.FloatTensor(args.batch_size, 30).to(device)
+for i in xrange(args.niter):
 
-    optimizerI = optim.Adam(netI.parameters(), lr=1e-4, amsgrad=True)
+    optimizer.zero_grad()
+    w.normal_(0,1)
+    z = netI(w)
+    z = z.view(z.shape[0], z.shape[1], 1, 1)
+    err = -logp(z).mean()
+    ent = utils.sample_entropy(z)
+    kl = err - ent
+    kl.backward()
+    optimizer.step()
 
-    logger = utils.Logger(args.outf, netG, netI, args.hddfile, device)
+    history.dump(KL=kl.item(), nlogp=err.item(), entropy=ent.item())
 
-    for i in xrange(args.niter):
-        optimizerI.zero_grad()
-        w.normal_(0,1)
-        z = netI(w)
-        mlogp = _mlogp(z.view(-1,30,1,1))
-        ent = utils.sample_entropy(z)
-        loss = - mlogp - ent
-        loss.backward()
-        optimizerI.step()
+    # --- logging
+    if (i+1) % int(max(min(args.niter/20,500),100)) == 0:
+        history.flush()
+        plotter.flush(i+1)
 
-        logger.dump(loss.item(), -mlogp.item(), ent.item())
-
-        # --- logging
-        if (i+1) % int(args.niter/20) == 0:
-            print '[{}/{}] loss: {} -logp: {} -ent: {}'.format(i+1, args.niter, loss.item(), -mlogp.item(), -ent.item())
-            logger.flush(i+1)
+        logging.info('[{}/{}] kl: {:.4f} | -logp: {:.4f} | entropy: {:.4f}'.format(
+            i+1, args.niter, kl.item(), err.item(), ent.item()))
